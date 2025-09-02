@@ -1,0 +1,7 @@
+spikingjelly/activation_based/model/parametric_lif_net.py merge=ours
+spikingjelly/activation_based/model/sew_resnet.py merge=ours
+spikingjelly/activation_based/model/snas_net.py merge=ours
+spikingjelly/activation_based/model/spike_dhs.py merge=ours
+spikingjelly/activation_based/model/spiking_resnet.py merge=ours
+spikingjelly/activation_based/model/spiking_vgg.py merge=ours
+spikingjelly/activation_based/model/spiking_vggws_ottt.py merge=ours
