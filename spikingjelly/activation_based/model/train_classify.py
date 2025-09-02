@@ -471,7 +471,7 @@ class Trainer:
             skfold_indices_path_local = os.path.join(args.output_dir, f"{args.dataset}_skfold_indices.json")
             skfold_indices_path_datasets = os.path.join(args.datadir, f"{args.dataset}_skfold_indices.json")
             
-            # 检查本地路径，如果不存在，则从共享路径复制或重新生成
+            # Check the local path and if it does not exist, copy or regenerate it from the shared path
             if not os.path.exists(skfold_indices_path_local):
                 if os.path.exists(skfold_indices_path_datasets):
                     print(f"Main process: Copying {skfold_indices_path_datasets} -> {skfold_indices_path_local}")
@@ -487,7 +487,7 @@ class Trainer:
                     
                     skf = StratifiedKFold(n_splits=args.data_fold_number, shuffle=True, random_state=42)
                     imgs, clses = zip(*dataset.imgs)
-                    # 注意：这里使用临时变量，避免污染后续作用域
+                    # Temporary variables are used here to avoid polluting subsequent scopes
                     _skfold_indices_list = [_ for _ in skf.split(imgs, clses)]
                     _skfold_indices_list = [[__.tolist() for __ in _] for _ in _skfold_indices_list]
                     
@@ -497,13 +497,13 @@ class Trainer:
                     print(f"Main process: Copying {skfold_indices_path_local} -> {skfold_indices_path_datasets}")
                     shutil.copy2(skfold_indices_path_local, skfold_indices_path_datasets)
 
-        # --- 2. 同步屏障 (所有进程执行) ---
-        # 确保所有进程都等待主进程完成文件操作
+        # --- 2. Synchronization barrier (all processes execute) ---
+        # Make sure all processes wait for the main process to complete the file operation
         if args.distributed:
             torch.distributed.barrier()
 
-        # --- 3. 数据加载阶段 (所有进程执行) ---
-        # 此刻，文件已保证存在，所有进程都可以安全地读取它
+        # --- 3. Data loading phase (all processes execute) ---
+        # At this point, the file is guaranteed to exist and all processes can safely read it
         skfold_indices_path_local = os.path.join(args.output_dir, f"{args.dataset}_skfold_indices.json")
         print(f"Loading skfold indices from {skfold_indices_path_local}")
         
