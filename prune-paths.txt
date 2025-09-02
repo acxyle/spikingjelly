@@ -1,7 +1,7 @@
-spikingjelly/spikingjelly/activation_based/model/parametric_lif_net.py
-spikingjelly/spikingjelly/activation_based/model/sew_resnet.py
-spikingjelly/spikingjelly/activation_based/model/snas_net.py
-spikingjelly/spikingjelly/activation_based/model/spike_dhs.py
-spikingjelly/spikingjelly/activation_based/model/spiking_resnet.py
-spikingjelly/spikingjelly/activation_based/model/spiking_vgg.py
-spikingjelly/spikingjelly/activation_based/model/spiking_vggws_ottt.py
+spikingjelly/activation_based/model/parametric_lif_net.py
+spikingjelly/activation_based/model/sew_resnet.py
+spikingjelly/activation_based/model/snas_net.py
+spikingjelly/activation_based/model/spike_dhs.py
+spikingjelly/activation_based/model/spiking_resnet.py
+spikingjelly/activation_based/model/spiking_vgg.py
+spikingjelly/activation_based/model/spiking_vggws_ottt.py
