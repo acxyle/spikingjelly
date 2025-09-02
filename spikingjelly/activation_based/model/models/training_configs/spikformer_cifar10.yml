@@ -1,0 +1,14 @@
+# Training config for Spikformer on CIFAR10
+# comment out target line here and write in terminal
+
+arch: spikformer_8_384
+dataset: cifar10 
+batch-size: 256
+lr: 5e-4
+wd: 6e-2
+cupy: true
+lr-warmup-epochs: 20
+val_resize_size: 32
+val_crop_size: 32
+train_crop_size: 32
+opt: adamw

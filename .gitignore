@@ -141,3 +141,7 @@ dmypy.json
 *.dat
 *.pt
 /test*.py
+
+# ---
+logs/
+results/

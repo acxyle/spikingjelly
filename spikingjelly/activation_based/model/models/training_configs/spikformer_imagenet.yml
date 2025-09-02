@@ -1,0 +1,14 @@
+# Training config for Spikformer on ImageNet
+# comment out target line here and write in terminal
+
+# arch: spikformer_b_16
+# dataset: ImageNet1k
+batch_size: 32
+lr: 5e-4
+wd: 5e-2
+cupy: true
+lr_warmup_epochs: 20
+val_resize_size: 224
+val_crop_size: 224
+train_crop_size: 224
+opt: adamw
