@@ -78,7 +78,7 @@ class Trainer:
         parser.add_argument("--datadir", default='/local/data/acxyle/Datasets', type=str)
         parser.add_argument("--dataset", default='C2k', type=str)
 
-        parser.add_argument("--arch", default="resnet18", type=str, help="model name")
+        parser.add_argument("--arch", default="sew_resnet18", type=str, help="model name")
         parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
         parser.add_argument("-b", "--batch-size", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size")
         parser.add_argument("--epochs", default=300, type=int, metavar="N", help="number of total epochs to run")
@@ -212,7 +212,7 @@ class Trainer:
         metric_logger = utils.MetricLogger(delimiter="  ")
         metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
         metric_logger.add_meter("img/s", utils.SmoothedValue(window_size=10, fmt="{value}"))
-
+        
         header = f"{datetime.datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')} Epoch: [{epoch}]"
         for i, (image, target) in enumerate(metric_logger.log_every(data_loader, -1, header)):
             start_time = time.time()
@@ -249,11 +249,21 @@ class Trainer:
             metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
             metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
             metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
-            metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
+            single_gpu_throughput = batch_size / (time.time() - start_time)
+            metric_logger.meters["img/s"].update(single_gpu_throughput)
         # gather the stats from all processes
         metric_logger.synchronize_between_processes()
         train_loss, train_acc1, train_acc5 = metric_logger.loss.global_avg, metric_logger.acc1.global_avg, metric_logger.acc5.global_avg
-        print(f'{datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")} Train: train_acc1={train_acc1:.3f}, train_acc5={train_acc5:.3f}, train_loss={train_loss:.6f}, samples/s={metric_logger.meters["img/s"].avg:.3f}')
+        multiple_gpus_throughput = getattr(metric_logger, 'img/s').global_avg
+        print( (
+                f'{datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")} '
+                f'Train: train_acc1={train_acc1:.3f} '
+                f'train_acc5={train_acc5:.3f} '
+                f'train_loss={train_loss:.6f} '
+                f'[gpu] samples/s={single_gpu_throughput:.3f} '
+                f'[gpus] samples/s={multiple_gpus_throughput:.3f}'
+                ) )
+        
         return train_loss, train_acc1, train_acc5
 
     def evaluate(self, args, model, criterion, data_loader, device, log_suffix=""):
@@ -801,8 +811,8 @@ class Trainer:
         for epoch in range(args.start_epoch, args.epochs):
             
             # print(f"{datetime.datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')}", args)
-            for idx, _ in enumerate(model.Encoder):
-                print(f'Block {idx} | scale: {_.attn.qk_scale.data.detach().cpu().numpy():.5f}| scale_raw: {_.attn.qk_scale_raw.data.detach().cpu().numpy():.5f}')
+            # for idx, _ in enumerate(model.Encoder):
+            #    print(f'Block {idx} | scale: {_.attn.qk_scale.data.detach().cpu().numpy():.5f}| scale_raw: {_.attn.qk_scale_raw.data.detach().cpu().numpy():.5f}')
             
             start_time = time.time()
             if args.distributed:

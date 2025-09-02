@@ -24,17 +24,17 @@ class SResNetTrainer(train_classify.Trainer):
 
     def preprocess_train_sample(self, args, x: torch.Tensor):
         # define how to process train sample before send it to model
-        return x.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)  # [N, C, H, W] -> [T, N, C, H, W]
-        # return x
+        # return x.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)  # [N, C, H, W] -> [T, N, C, H, W]
+        return x
 
     def preprocess_test_sample(self, args, x: torch.Tensor):
         # define how to process test sample before send it to model
-        return x.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)  # [N, C, H, W] -> [T, N, C, H, W]
-        # return x
+        # return x.unsqueeze(0).repeat(args.T, 1, 1, 1, 1)  # [N, C, H, W] -> [T, N, C, H, W]
+        return x
         
     def process_model_output(self, args, y: torch.Tensor):
-        return y.mean(0)  # return firing rate
-        # return y
+        # return y.mean(0)  # return firing rate
+        return y
         
     def get_args_parser(self, add_help=True):
         
@@ -156,7 +156,7 @@ if __name__ == "__main__":
     #                                   -- dataset vgg_face
 
     config_parser = argparse.ArgumentParser(description='Training Config', add_help=False)
-    config_parser.add_argument('-c', '--config', default='spikformer_imagenet.yml', type=str, metavar='FILE')
+    config_parser.add_argument('-c', '--config', default='resnet_imagenet.yml', type=str, metavar='FILE')
     
     trainer = SResNetTrainer()
     parser = trainer.get_args_parser()
