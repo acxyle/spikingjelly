@@ -1,0 +1,14 @@
+# Training config for VGG on ImageNet
+# comment out target line here and write in terminal
+
+# arch: vgg16_bn
+# dataset: ImageNet1k
+# batch_size: 32
+lr: 0.01
+wd: 1e-4
+cupy: true
+lr_warmup_epochs: 10
+val_resize_size: 232
+val_crop_size: 224
+train_crop_size: 176
+opt: sgd
