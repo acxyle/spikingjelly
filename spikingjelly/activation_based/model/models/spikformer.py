@@ -8,16 +8,22 @@ Created on Wed Aug 27 12:55:31 2025
 
     refer to: https://github.com/ZK-Zhou/spikformer/tree/main
     
-    The original code adopted spikingjelly ver < 0.12, but this code uses new ver
-    The original code registered model for timm training script but this code does not
+    This code adopted spikingjelly ver > 0.12
     This code merged standard and lite spikformer
+
+    ---
+
+    models without 'plain' in the name use: conv stem + rpe + no pos emb
+    models with 'plain' in the name use: patchify + pos emb (+ class token)
+
+    ---
 
     TODO:
        
     1. main fucntion works ✅
-    2. recorver sr settings
-    3. recorver learnable settings
-    4. recorver pretrained weights
+    2. recorver sr settings -> ?
+    3. recorver learnable settings ✅
+    4. recorver pretrained weights -> ?
 
 """
 
@@ -49,7 +55,17 @@ __all__ = [
     
     'Spikformer_lite',
     'spikformer_4_384',
-    'spikformer_8_384'
+    'spikformer_8_384',
+
+    'spikformer_8_512_plain',
+    'spikformer_b_16_plain',
+    'spikformer_b_32_plain',
+    'spikformer_l_16_plain',
+    'spikformer_l_32_plain',
+    'spikformer_h_14_plain',
+
+    'spikformer_4_384_plain',
+    'spikformer_8_384_plain',
     
     ]
 
@@ -91,8 +107,8 @@ class MLP(nn.Module):
         return x
 
 
-def _softplus_inv(y: float, eps: float = 1e-12) -> float:
-    # Softplus 的近似反函数: raw = log(exp(y) - 1)
+def _softplus_inv(y: float, eps: float = 1e-10) -> float:
+    # inverse func of Softplus: raw = log(exp(y) - 1)
     return math.log(max(math.exp(y) - 1.0, eps))
 
 
@@ -120,9 +136,9 @@ class SSA(nn.Module):
         self.dim = dim
         self.num_heads = num_heads
 
-        # 原始初始值：保持和原代码一致
+        # --- init
         base_scale = qk_scale or (self.dim//self.num_heads)**-0.5
-        # 参数化 qk_scale: raw -> softplus(raw) >= 0
+        # qk_scale: raw -> softplus(raw) >= 0
         raw_init = _softplus_inv(float(base_scale))
         self.qk_scale_raw = nn.Parameter(torch.tensor(raw_init, dtype=torch.float32))
         # self.qk_scale = qk_scale or (self.dim//self.num_heads)**-0.5
@@ -150,7 +166,7 @@ class SSA(nn.Module):
 
     @property
     def qk_scale(self) -> torch.Tensor:
-        # softplus 保证 qk_scale 始终为正
+        # softplus: y = log(1 + exp(x))
         return F.softplus(self.qk_scale_raw)
 
     def _attn_qk_v(self, q, k, v, x):
@@ -248,6 +264,64 @@ class EncoderBlock(nn.Module):
         return x
 
 
+class Encoder(nn.Module):
+
+    def __init__(
+        self,
+        seq_length:int,
+        embed_dims:int, 
+        num_heads:int, 
+        mlp_ratios:int, 
+        qkv_bias:bool, 
+        depths:int, 
+        qk_scale:float,
+        drop_rate:float, 
+        attn_drop_rate:float, 
+        drop_path_rate:float, 
+        # norm_layer:callable,
+        # sr_ratios:int,
+        spiking_neuron:callable, 
+        enable_pos_embed:bool,
+        **kwargs
+    ):
+        super().__init__()
+        
+        self.enable_pos_embed = enable_pos_embed
+        self.pos_embedding = nn.Parameter(torch.empty(1, seq_length, embed_dims).normal_(std=0.02))  # from BERT
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depths)]  # stochastic depth decay rule
+ 
+        layers = nn.ModuleList([EncoderBlock(
+                                    dim=embed_dims, 
+                                    num_heads=num_heads, 
+                                    mlp_ratio=mlp_ratios, 
+                                    qkv_bias=qkv_bias,
+                                    qk_scale=qk_scale, 
+                                    drop=drop_rate, 
+                                    attn_drop=attn_drop_rate, 
+                                    drop_path=dpr[j],
+                                    # norm_layer=norm_layer, 
+                                    # sr_ratio=sr_ratios,
+                                    spiking_neuron=spiking_neuron, 
+                                    **kwargs)
+                                        for j in range(depths)])
+
+        self.layers = layers
+
+
+    def forward(self, x: torch.Tensor):
+        torch._assert(x.dim() in (3, 4), f"Expected 3D or 4D tensor: (N, S, E) or (T, N, S, E); got {tuple(x.shape)}")
+        
+        if self.enable_pos_embed:
+            x = x + self.pos_embedding
+
+        attn = None
+        for blk in self.layers:
+            x = blk(x, attn)
+
+        return x
+
+
 class SPS(nn.Module):
     
     _version = 2
@@ -261,6 +335,7 @@ class SPS(nn.Module):
         in_channels:int, 
         embed_dims:int,
         spiking_neuron:callable=None, 
+        emable_conv_stem:bool=True,
         **kwargs
         ):
         super().__init__()
@@ -278,35 +353,43 @@ class SPS(nn.Module):
         self.W = img_size_w // patch_size
         self.num_patches = self.H * self.W
         
-        if patch_size in [16, 32]:
-            if patch_size == 16:
-                chs = [in_channels, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
-            elif patch_size == 32:
-                chs = [in_channels, embed_dims//16, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
+        if emable_conv_stem:
+            self.enable_rpe = True
+            if patch_size in [16, 32]:
+                if patch_size == 16:
+                    chs = [in_channels, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
+                elif patch_size == 32:
+                    chs = [in_channels, embed_dims//16, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
 
-            stem_layers = []
-            for i in range(int(len(chs)-1)):
-                stem_layers += [
-                                layer.Conv2d(chs[i], chs[i+1], kernel_size=3, stride=1, padding=1, bias=False),
-                                layer.BatchNorm2d(chs[i+1]),
+                stem_layers = []
+                for i in range(int(len(chs)-1)):
+                    stem_layers += [
+                                    layer.Conv2d(chs[i], chs[i+1], kernel_size=3, stride=1, padding=1, bias=False),
+                                    layer.BatchNorm2d(chs[i+1]),
+                                    spiking_neuron(**deepcopy(kwargs)),
+                                    layer.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)
+                                    ]
+                
+            if patch_size == 14:
+                chs = [in_channels, embed_dims//8, embed_dims//4, embed_dims//2]
+                stem_layers = []
+                for i in range(int(len(chs)-1)):
+                    stem_layers += [
+                                    layer.Conv2d(chs[i], chs[i+1], kernel_size=3, stride=1, padding=1, bias=False),
+                                    layer.BatchNorm2d(chs[i+1]),
+                                    spiking_neuron(**deepcopy(kwargs)),
+                                    layer.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)
+                                    ]
+                stem_layers += [layer.Conv2d(embed_dims//2, embed_dims, kernel_size=3, stride=1, padding=1, bias=False),
+                                layer.BatchNorm2d(embed_dims),
                                 spiking_neuron(**deepcopy(kwargs)),
-                                layer.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)
-                                ]
-            
-        if patch_size == 14:
-            chs = [in_channels, embed_dims//8, embed_dims//4, embed_dims//2]
-            stem_layers = []
-            for i in range(int(len(chs)-1)):
-                stem_layers += [
-                                layer.Conv2d(chs[i], chs[i+1], kernel_size=3, stride=1, padding=1, bias=False),
-                                layer.BatchNorm2d(chs[i+1]),
-                                spiking_neuron(**deepcopy(kwargs)),
-                                layer.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)
-                                ]
-            stem_layers += [layer.Conv2d(embed_dims//2, embed_dims, kernel_size=3, stride=1, padding=1, bias=False),
-                            layer.BatchNorm2d(embed_dims),
-                            spiking_neuron(**deepcopy(kwargs)),
-                            layer.AdaptiveAvgPool2d((16, 16))]
+                                layer.AdaptiveAvgPool2d((16, 16))]
+        else:
+            self.enable_rpe = False
+            stem_layers = [layer.Conv2d(in_channels=in_channels, out_channels=embed_dims, kernel_size=patch_size, stride=patch_size),
+                           # layer.BatchNorm2d(embed_dims),
+                           # spiking_neuron(**deepcopy(kwargs))
+                           ]  
                 
         self.conv_stem = nn.Sequential(*stem_layers)
 
@@ -314,13 +397,12 @@ class SPS(nn.Module):
                             layer.Conv2d(embed_dims, embed_dims, kernel_size=3, stride=1, padding=1, bias=False),
                             layer.BatchNorm2d(embed_dims),
                             spiking_neuron(**deepcopy(kwargs)),
-                        )
+                            )
 
     def forward(self, x):
         x = self.conv_stem(x)
-        x_feat = x
-        x = self.rpe(x)
-        x = x + x_feat     # (T, B, C, H, W)
+        if self.enable_rpe:
+            x = x + self.rpe(x)     # (T, B, C, H, W)
         x = x.flatten(-2).transpose(-1, -2)   # (T, B, H*W, C) aka (T, B, S, E)
         
         return x
@@ -346,6 +428,9 @@ class Spikformer(nn.Module):
         # norm_layer:callable,
         # sr_ratios:int,
         spiking_neuron:callable=None, 
+        emable_conv_stem:bool=True,
+        enable_pos_embed:bool=False,
+        enable_class_token:bool=False,
         **kwargs
         ):
         
@@ -355,6 +440,14 @@ class Spikformer(nn.Module):
         self.num_classes = num_classes
         self.depths = depths
 
+        seq_length = (img_size_h // patch_size) ** 2
+
+        if enable_class_token:
+            # Add a class token
+            self.class_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
+            seq_length += 1
+        self.enable_class_token = enable_class_token
+
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depths)]  # stochastic depth decay rule
 
         patch_embed = SPS(img_size_h=img_size_h,
@@ -363,25 +456,26 @@ class Spikformer(nn.Module):
                             in_channels=in_channels,
                             embed_dims=embed_dims,
                             spiking_neuron=spiking_neuron, 
+                            emable_conv_stem=emable_conv_stem,
                             **kwargs)
 
-        Encoder = nn.ModuleList([EncoderBlock(
-                                    dim=embed_dims, 
-                                    num_heads=num_heads, 
-                                    mlp_ratio=mlp_ratios, 
-                                    qkv_bias=qkv_bias,
-                                    qk_scale=qk_scale, 
-                                    drop=drop_rate, 
-                                    attn_drop=attn_drop_rate, 
-                                    drop_path=dpr[j],
-                                    # norm_layer=norm_layer, 
-                                    # sr_ratio=sr_ratios,
-                                    spiking_neuron=spiking_neuron, 
-                                    **kwargs)
-                                        for j in range(depths)])
-        
         self.patch_embed = patch_embed
-        self.Encoder = Encoder
+        
+        self.encoder = Encoder(
+                            seq_length=seq_length,
+                            embed_dims=embed_dims, 
+                            num_heads=num_heads, 
+                            mlp_ratios=mlp_ratios, 
+                            qkv_bias=qkv_bias, 
+                            depths=depths, 
+                            qk_scale=qk_scale,
+                            drop_rate=drop_rate, 
+                            attn_drop_rate=attn_drop_rate, 
+                            drop_path_rate=drop_path_rate, 
+                            spiking_neuron=spiking_neuron, 
+                            enable_pos_embed=enable_pos_embed,
+                            **kwargs
+                            )
 
         # classification head
         self.head = layer.Linear(embed_dims, num_classes) if num_classes > 0 else nn.Identity()
@@ -409,10 +503,14 @@ class Spikformer(nn.Module):
         T,B,C,H,W = x.shape
         torch._assert(H == self.img_size_h, f"Wrong image height! Expected {self.img_size_h} but got {H}!")
         torch._assert(W == self.img_size_w, f"Wrong image width! Expected {self.img_size_w} but got {W}!")
-        x = self.patch_embed(x)
-        attn = None
-        for blk in self.Encoder:
-            x = blk(x, attn)
+
+        x = self.patch_embed(x)     # (T, B, S, E)
+
+        if self.enable_class_token:
+            batch_class_token = self.class_token.expand(T, B, -1, -1)
+            x = torch.cat([batch_class_token, x], dim=-2)
+            x = self.encoder(x)
+
         x = x.mean(2)
         x = self.head(x)
         return x
@@ -446,6 +544,33 @@ def spikformer_8_512(pretrained=False, **kwargs):
     return model
 
 
+def spikformer_8_512_plain(pretrained=False, **kwargs):
+
+    model = Spikformer(
+        img_size_h=224, 
+        img_size_w=224,
+        patch_size=16, 
+        in_channels=3, 
+        embed_dims=512, 
+        num_heads=8, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=8, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
+        **kwargs
+    )
+
+    return model
+
+
 # --- same as vit arch
 def spikformer_b_16(pretrained=False, **kwargs):
     model = Spikformer(
@@ -464,6 +589,32 @@ def spikformer_b_16(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        **kwargs
+    )
+
+    return model
+
+
+def spikformer_b_16_plain(pretrained=False, **kwargs):
+    model = Spikformer(
+        img_size_h=224, 
+        img_size_w=224,
+        patch_size=16, 
+        in_channels=3, 
+        embed_dims=768, 
+        num_heads=12, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=11, 
+        qk_scale=None,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
         **kwargs
     )
 
@@ -493,6 +644,32 @@ def spikformer_b_32(pretrained=False, **kwargs):
     return model
 
 
+def spikformer_b_32_plain(pretrained=False, **kwargs):
+    model = Spikformer(
+        img_size_h=224, 
+        img_size_w=224,
+        patch_size=32, 
+        in_channels=3, 
+        embed_dims=768, 
+        num_heads=12, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=11, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
+        **kwargs
+    )
+
+    return model
+
+
 def spikformer_l_16(pretrained=False, **kwargs):
     model = Spikformer(
         img_size_h=224, 
@@ -510,6 +687,32 @@ def spikformer_l_16(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        **kwargs
+    )
+
+    return model
+
+
+def spikformer_l_16_plain(pretrained=False, **kwargs):
+    model = Spikformer(
+        img_size_h=224, 
+        img_size_w=224,
+        patch_size=16, 
+        in_channels=3, 
+        embed_dims=1024, 
+        num_heads=16, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=23, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
         **kwargs
     )
 
@@ -539,6 +742,32 @@ def spikformer_l_32(pretrained=False, **kwargs):
     return model
 
 
+def spikformer_l_32_plain(pretrained=False, **kwargs):
+    model = Spikformer(
+        img_size_h=224, 
+        img_size_w=224,
+        patch_size=32, 
+        in_channels=3, 
+        embed_dims=1024, 
+        num_heads=16, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=23, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
+        **kwargs
+    )
+
+    return model
+
+
 def spikformer_h_14(pretrained=False, **kwargs):
     model = Spikformer(
         img_size_h=224, 
@@ -556,6 +785,32 @@ def spikformer_h_14(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        **kwargs
+    )
+
+    return model
+
+
+def spikformer_h_14_plain(pretrained=False, **kwargs):
+    model = Spikformer(
+        img_size_h=224, 
+        img_size_w=224,
+        patch_size=14, 
+        in_channels=3, 
+        embed_dims=1280, 
+        num_heads=16, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=31, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
         **kwargs
     )
 
@@ -581,6 +836,7 @@ class SPS_lite(nn.Module):
         in_channels:int, 
         embed_dims:int,
         spiking_neuron:callable=None, 
+        emable_conv_stem:bool=True,
         **kwargs
         ):
         super().__init__()
@@ -598,21 +854,29 @@ class SPS_lite(nn.Module):
         self.W = img_size_w // patch_size
         self.num_patches = self.H * self.W
         
-        if patch_size == 4:
-            chs = [in_channels, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
-        elif patch_size == 8:
-            chs = [in_channels, embed_dims//16, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
+        if emable_conv_stem:
+            self.enable_rpe = True
+            if patch_size == 4:
+                chs = [in_channels, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
+            elif patch_size == 8:
+                chs = [in_channels, embed_dims//16, embed_dims//8, embed_dims//4, embed_dims//2, embed_dims]
 
-        stem_layers = []
-        for i in range(len(chs)-1):
-            stem_layers += [
-                            layer.Conv2d(chs[i], chs[i+1], kernel_size=3, stride=1, padding=1, bias=False),
-                            layer.BatchNorm2d(chs[i+1]),
-                            spiking_neuron(**deepcopy(kwargs)),
-                            ]
-            if i > 1:
-                stem_layers += [layer.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)]
-                
+            stem_layers = []
+            for i in range(len(chs)-1):
+                stem_layers += [
+                                layer.Conv2d(chs[i], chs[i+1], kernel_size=3, stride=1, padding=1, bias=False),
+                                layer.BatchNorm2d(chs[i+1]),
+                                spiking_neuron(**deepcopy(kwargs)),
+                                ]
+                if i > 1:
+                    stem_layers += [layer.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)]
+        else:
+            self.enable_rpe = False
+            stem_layers = [layer.Conv2d(in_channels=in_channels, out_channels=embed_dims, kernel_size=patch_size, stride=patch_size),
+                           # layer.BatchNorm2d(embed_dims),
+                           # spiking_neuron(**deepcopy(kwargs))
+                           ]
+
         self.conv_stem = nn.Sequential(*stem_layers)
 
         self.rpe = nn.Sequential(
@@ -623,9 +887,8 @@ class SPS_lite(nn.Module):
 
     def forward(self, x):
         x = self.conv_stem(x)
-        x_feat = x
-        x = self.rpe(x)
-        x = x + x_feat     # (T, B, C, H, W)
+        if self.enable_rpe:
+            x = x + self.rpe(x)     # (T, B, C, H, W)
         x = x.flatten(-2).transpose(-1, -2)   # (T, B, H*W, C) aka (T, B, S, E)
         
         return x
@@ -651,6 +914,9 @@ class Spikformer_lite(nn.Module):
         # norm_layer:callable,
         # sr_ratios:int,
         spiking_neuron:callable=None, 
+        emable_conv_stem:bool=True,
+        enable_pos_embed:bool=False,
+        enable_class_token:bool=False,
         **kwargs
         ):
         
@@ -660,6 +926,13 @@ class Spikformer_lite(nn.Module):
         self.num_classes = num_classes
         self.depths = depths
 
+        seq_length = (img_size_h // patch_size) ** 2
+        if enable_class_token:
+            # Add a class token
+            self.class_token = nn.Parameter(torch.zeros(1, 1, embed_dims))
+            seq_length += 1
+        self.enable_class_token = enable_class_token
+
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depths)]  # stochastic depth decay rule
 
         patch_embed = SPS_lite(img_size_h=img_size_h,
@@ -668,25 +941,26 @@ class Spikformer_lite(nn.Module):
                             in_channels=in_channels,
                             embed_dims=embed_dims,
                             spiking_neuron=spiking_neuron, 
+                            emable_conv_stem=emable_conv_stem,
                             **kwargs)
 
-        Encoder = nn.ModuleList([EncoderBlock(
-                                    dim=embed_dims, 
-                                    num_heads=num_heads, 
-                                    mlp_ratio=mlp_ratios, 
-                                    qkv_bias=qkv_bias,
-                                    qk_scale=qk_scale, 
-                                    drop=drop_rate, 
-                                    attn_drop=attn_drop_rate, 
-                                    drop_path=dpr[j],
-                                    # norm_layer=norm_layer, 
-                                    # sr_ratio=sr_ratios,
-                                    spiking_neuron=spiking_neuron, 
-                                    **kwargs)
-                                        for j in range(depths)])
-        
         self.patch_embed = patch_embed
-        self.Encoder = Encoder
+        
+        self.encoder = Encoder(
+                            seq_length=seq_length,
+                            embed_dims=embed_dims, 
+                            num_heads=num_heads, 
+                            mlp_ratios=mlp_ratios, 
+                            qkv_bias=qkv_bias, 
+                            depths=depths, 
+                            qk_scale=qk_scale,
+                            drop_rate=drop_rate, 
+                            attn_drop_rate=attn_drop_rate, 
+                            drop_path_rate=drop_path_rate, 
+                            spiking_neuron=spiking_neuron, 
+                            enable_pos_embed=enable_pos_embed,
+                            **kwargs
+                            )
 
         # classification head
         self.head = layer.Linear(embed_dims, num_classes) if num_classes > 0 else nn.Identity()
@@ -714,10 +988,16 @@ class Spikformer_lite(nn.Module):
         T,B,C,H,W = x.shape
         torch._assert(H == self.img_size_h, f"Wrong image height! Expected {self.img_size_h} but got {H}!")
         torch._assert(W == self.img_size_w, f"Wrong image width! Expected {self.img_size_w} but got {W}!")
+        
         x = self.patch_embed(x)
-        attn = None
-        for blk in self.Encoder:
-            x = blk(x, attn)
+
+        if self.enable_class_token:
+            batch_class_token = self.class_token.expand(T, B, -1, -1)
+            x = torch.cat([batch_class_token, x], dim=-2)
+            x = self.encoder(x)
+
+        x = self.encoder(x)
+
         x = x.mean(2)
         x = self.head(x)
         return x
@@ -749,9 +1029,37 @@ def spikformer_4_384(pretrained=False, **kwargs):
 
     return model
 
+
+def spikformer_4_384_plain(pretrained=False, **kwargs):
+
+    model = Spikformer_lite(
+        img_size_h=32, 
+        img_size_w=32,
+        patch_size=4, 
+        in_channels=3, 
+        embed_dims=384, 
+        num_heads=12, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=4, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
+        **kwargs
+    )
+
+    return model
+
+
 def spikformer_8_384(pretrained=False, **kwargs):
     """ 
-    default architecture of spikformer paper, termed as 'spikformer_4_384',
+    default architecture of spikformer paper, termed 'spikformer_4_384',
     no activate maintainance for this function, modify variables here for other architectures mentioned in the paper
     """
     model = Spikformer_lite(
@@ -776,6 +1084,37 @@ def spikformer_8_384(pretrained=False, **kwargs):
     return model
 
 
+def spikformer_8_384_plain(pretrained=False, **kwargs):
+
+    model = Spikformer_lite(
+        img_size_h=32, 
+        img_size_w=32,
+        patch_size=8, 
+        in_channels=3, 
+        embed_dims=384, 
+        num_heads=12, 
+        mlp_ratios=4,
+        qkv_bias=False,
+        depths=4, 
+        qk_scale=0.125,
+        drop_rate=0., 
+        attn_drop_rate=0., 
+        drop_path_rate=0.,
+        # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
+        # sr_ratios=1,
+        emable_conv_stem=False,
+        enable_pos_embed=True,
+        enable_class_token=True,
+        **kwargs
+    )
+
+    return model
+
+
+def hook_fn(module, inputs, outputs) -> None:
+    
+    feature_single_layer.append(torch.mean(outputs.detach().cpu(), dim=0)) 
+
 if __name__ == "__main__":
     
     device = 'cuda:0'
@@ -783,8 +1122,8 @@ if __name__ == "__main__":
     _neuron = neuron.LIFNode
     _surrogate = surrogate.ATan()
     
-    model = spikformer_b_16(
-                    num_classes=1000,
+    model = spikformer_8_384_plain(
+                    num_classes=10,
                     spiking_neuron=_neuron, 
                     surrogate_function=_surrogate, 
                     detach_reset=True)
@@ -793,10 +1132,37 @@ if __name__ == "__main__":
     functional.set_step_mode(model, step_mode='m')
 
     model.to(device)
+
+    target_modules = [
+        "patch_embed.conv_stem",
+        "encoder.layers.0",
+        "encoder.layers.1",
+        "encoder.layers.2",
+        "encoder.layers.3",
+        "encoder.layers.4",
+        "encoder.layers.5",
+        "encoder.layers.6",
+        "encoder.layers.7",
+        "encoder.layers.8",
+        "encoder.layers.9",
+        "encoder.layers.10",
+        "head"
+    ]
+
+    feature_single_layer = []
+    handles = []
+        
+    for _n, _m in model.named_modules():
+        if _n in target_modules:
+            print(_n)
+            handle = _m.register_forward_hook(hook_fn)
+            handles.append(handle)
     
-    x = torch.ones((4,1,3,224,224))
+    x = torch.ones((4,1,3,32,32))
     x = x.to(device)
-    y = model(x)
+    
+    with torch.inference_mode():
+        y = model(x)
 
     print(y.shape)
     

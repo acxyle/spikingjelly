@@ -21,7 +21,7 @@ root=/local/data/acxyle/Github/spikingjelly/spikingjelly/activation_based/model
 
 cd $root
 
-MODEL_ARCH=spikformer_b_16
+MODEL_ARCH=spikformer_b_16_plain
 DATASET=C2k
 NEURON=LIF
 
@@ -41,17 +41,19 @@ exec > >(tee -a "${root}/logs/${prefix}_${output_name}.output") 2>&1
 fi
 
 # -- put head_info into .output file
-bash job_utils/txt_box.sh -w 80 -c '#' "$head_info"
+bash job_scripts/job_utils/txt_box.sh -w 80 -c '#' "$head_info"
 
 echo "[INFO] Running for arch=$MODEL_ARCH, dataset=$DATASET, neuron=$NEURON"
 
 # --- 
 python training_script.py \
+            -c spikformer_imagenet.yml \
             --arch $MODEL_ARCH \
             --dataset $DATASET \
             --neuron $NEURON \
             --data-fold-training True \
-            --data-fold-index 0 
+            --data-fold-index 0 \
+            --clip-grad-norm 1.0
 
 # torchrun --standalone --nnodes=1 --nproc-per-node=gpu \
 #     training_script.py \

@@ -14,7 +14,7 @@ hyperparameters:
     - vgg must use regularization for all datasets
 """
 
-
+import torch.distributed as dist
 import datetime
 import os
 import time
@@ -59,8 +59,7 @@ def set_deterministic(_seed_: int = 2020, disable_uda=False):
     else:
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         # set a debug environment variable CUBLAS_WORKSPACE_CONFIG to ":16:8" (may limit overall performance) or ":4096:8" (will increase library footprint in GPU memory by approximately 24MiB).
-        torch.use_deterministic_algorithms(True)
-
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def seed_worker(worker_id):
@@ -249,19 +248,18 @@ class Trainer:
             metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
             metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
             metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
-            single_gpu_throughput = batch_size / (time.time() - start_time)
-            metric_logger.meters["img/s"].update(single_gpu_throughput)
+            metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
         # gather the stats from all processes
         metric_logger.synchronize_between_processes()
         train_loss, train_acc1, train_acc5 = metric_logger.loss.global_avg, metric_logger.acc1.global_avg, metric_logger.acc5.global_avg
-        multiple_gpus_throughput = getattr(metric_logger, 'img/s').global_avg
+        single_gpu_throughput = getattr(metric_logger, 'img/s').global_avg
         print( (
                 f'{datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")} '
                 f'Train: train_acc1={train_acc1:.3f} '
                 f'train_acc5={train_acc5:.3f} '
                 f'train_loss={train_loss:.6f} '
                 f'[gpu] samples/s={single_gpu_throughput:.3f} '
-                f'[gpus] samples/s={multiple_gpus_throughput:.3f}'
+                f'[gpus] samples/s={single_gpu_throughput*args.world_size:.3f}'
                 ) )
         
         return train_loss, train_acc1, train_acc5
@@ -324,9 +322,10 @@ class Trainer:
     def load_data(self, args):
         if args.dataset.lower() == 'cifar10':
             return self.load_CIFAR10(args)
+        elif 'imagenet' in args.dataset.lower():
+            return self.load_ImageNet(args)
         else:
-            return self.load_fused_data(args, )
-            # return self.load_ImageNet(args)
+            return self.load_fused_data(args)
 
     def load_CIFAR10(self, args):
         # Data loading code
@@ -811,8 +810,9 @@ class Trainer:
         for epoch in range(args.start_epoch, args.epochs):
             
             # print(f"{datetime.datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')}", args)
-            # for idx, _ in enumerate(model.Encoder):
-            #    print(f'Block {idx} | scale: {_.attn.qk_scale.data.detach().cpu().numpy():.5f}| scale_raw: {_.attn.qk_scale_raw.data.detach().cpu().numpy():.5f}')
+            if 'spikformer' in args.arch.lower():
+                for idx, _ in enumerate(model.encoder.layers):
+                    print(f'Block {idx} | scale: {_.attn.qk_scale.data.detach().cpu().numpy():.5f}| scale_raw: {_.attn.qk_scale_raw.data.detach().cpu().numpy():.5f}')
             
             start_time = time.time()
             if args.distributed:

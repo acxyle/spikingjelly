@@ -6,6 +6,7 @@ Created on Wed Jun  5 17:10:25 2024
 @author: acxyle-workstation
 
     rewrite from pytorch vision_transformer
+    
 """
 
 import math
@@ -36,6 +37,11 @@ __all__ = [
     "vit_l_16",
     "vit_l_32",
     "vit_h_14",
+
+    "vit_b_16_conv_stem",
+    "vit_b_32_conv_stem",
+    "vit_l_16_conv_stem",
+    "vit_l_32_conv_stem",
 ]
 
 
@@ -205,25 +211,42 @@ class VisionTransformer(nn.Module):
             for i, conv_stem_layer_config in enumerate(conv_stem_configs):
                 seq_proj.add_module(
                     f"conv_bn_relu_{i}",
-                    Conv2dNormActivation(
-                        in_channels=prev_channels,
-                        out_channels=conv_stem_layer_config.out_channels,
-                        kernel_size=conv_stem_layer_config.kernel_size,
-                        stride=conv_stem_layer_config.stride,
-                        norm_layer=conv_stem_layer_config.norm_layer,
-                        activation_layer=conv_stem_layer_config.activation_layer,
-                    ),
+                    # Conv2dNormActivation(     # --- pytorch implementation, conv-norm-act
+                    #     in_channels=prev_channels,
+                    #     out_channels=conv_stem_layer_config.out_channels,
+                    #     kernel_size=conv_stem_layer_config.kernel_size,
+                    #     stride=conv_stem_layer_config.stride,
+                    #     norm_layer=conv_stem_layer_config.norm_layer,
+                    #     activation_layer=conv_stem_layer_config.activation_layer,
+                    #     ),
+                    nn.Sequential(     # --- spikformer conv_stem, conv-norm-act-pool
+                            nn.Conv2d(prev_channels, conv_stem_layer_config.out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+                            nn.BatchNorm2d(conv_stem_layer_config.out_channels),
+                            nn.ReLU(inplace=True),
+                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)
+                    )
                 )
                 prev_channels = conv_stem_layer_config.out_channels
             seq_proj.add_module(
                 "conv_last", nn.Conv2d(in_channels=prev_channels, out_channels=hidden_dim, kernel_size=1)
             )
             self.conv_proj: nn.Module = seq_proj
+
+            # ---
+            self.enable_rpe = True
+            self.rpe = nn.Sequential(
+                                nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1, bias=False),
+                                nn.BatchNorm2d(hidden_dim),
+                                nn.ReLU(inplace=True),
+                            )
+
         else:
+            self.enable_rpe = False
             self.conv_proj = nn.Conv2d(
                 in_channels=3, out_channels=hidden_dim, kernel_size=patch_size, stride=patch_size
             )
 
+        # ---
         seq_length = (image_size // patch_size) ** 2
 
         # Add a class token
@@ -285,6 +308,11 @@ class VisionTransformer(nn.Module):
 
         # (n, c, h, w) -> (n, hidden_dim, n_h, n_w)
         x = self.conv_proj(x)
+
+        # --- rpe
+        if self.enable_rpe:
+            x = x + self.rpe(x)
+
         # (n, hidden_dim, n_h, n_w) -> (n, hidden_dim, (n_h * n_w))
         x = x.reshape(n, self.hidden_dim, n_h * n_w)
 
@@ -659,6 +687,28 @@ def vit_b_16(*, weights: Optional[ViT_B_16_Weights] = None, progress: bool = Tru
     )
 
 
+def vit_b_16_conv_stem(**kwargs: Any) -> VisionTransformer:
+
+    conv_stem_configs = [
+        ConvStemConfig(out_channels=98, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=192, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=384, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=768, kernel_size=None, stride=None)
+    ]
+
+    return _vision_transformer(
+        patch_size=16,
+        num_layers=11,
+        num_heads=12,
+        hidden_dim=768,
+        mlp_dim=3072,
+        conv_stem_configs=conv_stem_configs,
+        weights=None,
+        progress=False,
+        **kwargs,
+    )
+
+
 @handle_legacy_interface(weights=("pretrained", ViT_B_32_Weights.IMAGENET1K_V1))
 def vit_b_32(*, weights: Optional[ViT_B_32_Weights] = None, progress: bool = True, **kwargs: Any) -> VisionTransformer:
     """
@@ -688,6 +738,29 @@ def vit_b_32(*, weights: Optional[ViT_B_32_Weights] = None, progress: bool = Tru
         mlp_dim=3072,
         weights=weights,
         progress=progress,
+        **kwargs,
+    )
+
+
+def vit_b_32_conv_stem(**kwargs: Any) -> VisionTransformer:
+
+    conv_stem_configs = [
+        ConvStemConfig(out_channels=48, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=98, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=192, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=384, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=768, kernel_size=None, stride=None)
+    ]
+
+    return _vision_transformer(
+        patch_size=32,
+        num_layers=11,
+        num_heads=12,
+        hidden_dim=768,
+        mlp_dim=3072,
+        conv_stem_configs=conv_stem_configs,
+        weights=None,
+        progress=False,
         **kwargs,
     )
 
@@ -725,6 +798,28 @@ def vit_l_16(*, weights: Optional[ViT_L_16_Weights] = None, progress: bool = Tru
     )
 
 
+def vit_l_16_conv_stem(**kwargs: Any) -> VisionTransformer:
+
+    conv_stem_configs = [
+        ConvStemConfig(out_channels=98, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=192, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=384, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=768, kernel_size=None, stride=None)
+    ]
+
+    return _vision_transformer(
+        patch_size=16,
+        num_layers=23,
+        num_heads=16,
+        hidden_dim=1024,
+        mlp_dim=4096,
+        conv_stem_configs=conv_stem_configs,
+        weights=None,
+        progress=False,
+        **kwargs,
+    )
+
+
 @handle_legacy_interface(weights=("pretrained", ViT_L_32_Weights.IMAGENET1K_V1))
 def vit_l_32(*, weights: Optional[ViT_L_32_Weights] = None, progress: bool = True, **kwargs: Any) -> VisionTransformer:
     """
@@ -754,6 +849,29 @@ def vit_l_32(*, weights: Optional[ViT_L_32_Weights] = None, progress: bool = Tru
         mlp_dim=4096,
         weights=weights,
         progress=progress,
+        **kwargs,
+    )
+
+
+def vit_l_32_conv_stem(**kwargs: Any) -> VisionTransformer:
+
+    conv_stem_configs = [
+        ConvStemConfig(out_channels=48, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=98, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=192, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=384, kernel_size=None, stride=None),
+        ConvStemConfig(out_channels=768, kernel_size=None, stride=None)
+    ]
+
+    return _vision_transformer(
+        patch_size=32,
+        num_layers=23,
+        num_heads=16,
+        hidden_dim=1024,
+        mlp_dim=4096,
+        conv_stem_configs=conv_stem_configs,
+        weights=None,
+        progress=False,
         **kwargs,
     )
 
@@ -869,7 +987,48 @@ def interpolate_embeddings(
     return model_state
 
 
+def hook_fn(module, inputs, outputs) -> None:
+    
+    feature_single_layer.append(torch.mean(outputs.detach().cpu(), dim=0)) 
+
 
 if __name__ == "__main__":
     
-    model = vit_b_32()
+    model = vit_b_32_conv_stem()
+
+    target_modules = [
+        "conv_proj.conv_bn_relu_0",
+        "conv_proj.conv_bn_relu_1",
+        "conv_proj.conv_bn_relu_2",
+        "conv_proj.conv_bn_relu_3",
+        "conv_proj.conv_bn_relu_4",
+        "rpe",
+        "encoder.layers.encoder_layer_0",
+        "encoder.layers.encoder_layer_1",
+        "encoder.layers.encoder_layer_2",
+        "encoder.layers.encoder_layer_3",
+        "encoder.layers.encoder_layer_4",
+        "encoder.layers.encoder_layer_5",
+        "encoder.layers.encoder_layer_6",
+        "encoder.layers.encoder_layer_7",
+        "encoder.layers.encoder_layer_8",
+        "encoder.layers.encoder_layer_9",
+        "encoder.layers.encoder_layer_10",
+        "head"
+    ]
+
+    feature_single_layer = []
+    handles = []
+        
+    for _n, _m in model.named_modules():
+        if _n in target_modules:
+            handle = _m.register_forward_hook(hook_fn)
+            handles.append(handle)
+    
+    x = torch.ones((1,3,224,224))
+    
+    with torch.inference_mode():
+        y = model(x)
+
+    print(y.shape)
+    
