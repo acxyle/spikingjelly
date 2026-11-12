@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from copy import deepcopy
-from spikingjelly.activation_based import layer
+from spikingjelly.activation_based import layer, neuron, surrogate
 try:
     from torchvision.models.utils import load_state_dict_from_url
 except ImportError:
@@ -26,7 +26,6 @@ model_urls = {
 }
 
 # modified by https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py
-
 def sew_function(x: torch.Tensor, y: torch.Tensor, cnf:str):
     if cnf == 'ADD':
         return x + y
@@ -36,7 +35,6 @@ def sew_function(x: torch.Tensor, y: torch.Tensor, cnf:str):
         return x * (1. - y)
     else:
         raise NotImplementedError
-
 
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
@@ -52,8 +50,24 @@ def conv1x1(in_planes, out_planes, stride=1):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, cnf: str = None, spiking_neuron: callable = None, **kwargs):
+    def __init__(
+        self, 
+        inplanes, 
+        planes, 
+        stride=1, 
+        downsample=None, 
+        groups=1,
+        base_width=64, 
+        dilation=1, 
+        norm_layer=None, 
+        cnf: str = None, 
+        spiking_neuron: callable = None, 
+        # add default params to control neuron behavior
+
+        # other kwargs
+        **kwargs
+        ):
+        
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = layer.BatchNorm2d
@@ -73,6 +87,7 @@ class BasicBlock(nn.Module):
             self.downsample_sn = spiking_neuron(**deepcopy(kwargs))
         self.stride = stride
         self.cnf = cnf
+
 
     def forward(self, x):
         identity = x
@@ -95,6 +110,7 @@ class BasicBlock(nn.Module):
     def extra_repr(self) -> str:
         return super().extra_repr() + f'cnf={self.cnf}'
 
+
 class Bottleneck(nn.Module):
     # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
     # while original implementation places the stride at the first 1x1 convolution(self.conv1)
@@ -104,8 +120,21 @@ class Bottleneck(nn.Module):
 
     expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, cnf: str = None, spiking_neuron: callable = None, **kwargs):
+    def __init__(
+        self, 
+        inplanes, 
+        planes, 
+        stride=1, 
+        downsample=None, 
+        groups=1,
+        base_width=64, 
+        dilation=1, 
+        norm_layer=None, 
+        cnf: str = None, 
+        spiking_neuron: callable = None, 
+        **kwargs
+        ):
+
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = layer.BatchNorm2d
@@ -153,9 +182,21 @@ class Bottleneck(nn.Module):
 
 
 class SEWResNet(nn.Module):
-    def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
-                 groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None, cnf: str = None, spiking_neuron: callable = None, **kwargs):
+    def __init__(
+        self, 
+        block, 
+        layers, 
+        num_classes=1000, 
+        zero_init_residual=False,
+        groups=1, 
+        width_per_group=64, 
+        replace_stride_with_dilation=None,
+        norm_layer=None, 
+        cnf: str = None, 
+        spiking_neuron: callable = None, 
+        **kwargs
+        ):
+
         super().__init__()
         if norm_layer is None:
             norm_layer = layer.BatchNorm2d
@@ -199,7 +240,18 @@ class SEWResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilate=False, cnf: str=None, spiking_neuron: callable = None, **kwargs):
+    def _make_layer(
+        self, 
+        block, 
+        planes, 
+        blocks, 
+        stride=1, 
+        dilate=False, 
+        cnf: str=None, 
+        spiking_neuron: callable = None, 
+        **kwargs
+        ):
+        
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
@@ -249,74 +301,124 @@ class SEWResNet(nn.Module):
         return self._forward_impl(x)
 
 
-def _sew_resnet(arch, block, layers, pretrained, progress, cnf, spiking_neuron, **kwargs):
-    model = SEWResNet(block, layers, cnf=cnf, spiking_neuron=spiking_neuron, **kwargs)
+def _sew_resnet(
+    arch, 
+    block, 
+    layers, 
+    pretrained, 
+    progress, 
+    # ---
+    spiking_neuron: callable = neuron.LIFNode,
+    #
+    surrogate_function: callable = surrogate.ATan(),
+    detach_reset: bool = True,     # see below docstring for details
+    #
+    cnf='ADD', 
+    #
+    **kwargs
+    ):
+
+    """
+    input:
+        detach_reset: if ``True``, remove the reset operation from the computational graph, 
+        which is kind of treating the spike values as constant during the backward pass. 
+        
+        this is the default setting in spikingjelly practices. I guess the reason is that it helps with training stability,
+        and reduce the usage of GPU memory.
+        
+        but an interesting thing is, it breaks the completeness of the BPTT gradient chain, so (part of) the reset function
+        will not be considered when calculating gradients.
+        anyway I just use this setting for all SNN models.
+        
+    """
+
+    model = SEWResNet(
+        block, 
+        layers, 
+        #
+        spiking_neuron=spiking_neuron, 
+        surrogate_function=surrogate_function, 
+        detach_reset=detach_reset,
+        cnf=cnf, 
+        #
+        **kwargs
+        )
+    
     if pretrained:
         state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
         model.load_state_dict(state_dict)
+
     return model
 
 
-def sew_resnet18(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+def sew_resnet18(pretrained=False, progress=True, **kwargs):
 
-    return _sew_resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, **kwargs)
 
 
-def sew_resnet34(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+def sew_resnet34(pretrained=False, progress=True, **kwargs):
 
-    return _sew_resnet('resnet34', BasicBlock, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet('resnet34', BasicBlock, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
-def sew_resnet50(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
 
-    return _sew_resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+def sew_resnet50(pretrained=False, progress=True, **kwargs):
 
-def sew_resnet101(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+    return _sew_resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
-    return _sew_resnet('resnet101', Bottleneck, [3, 4, 23, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
 
-def sew_resnet152(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+def sew_resnet101(pretrained=False, progress=True, **kwargs):
 
-    return _sew_resnet('resnet152', Bottleneck, [3, 8, 36, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet('resnet101', Bottleneck, [3, 4, 23, 3], pretrained, progress, **kwargs)
 
-def sew_resnext50_32x4d(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+
+def sew_resnet152(pretrained=False, progress=True, **kwargs):
+
+    return _sew_resnet('resnet152', Bottleneck, [3, 8, 36, 3], pretrained, progress, **kwargs)
+
+
+def sew_resnext50_32x4d(pretrained=False, progress=True, **kwargs):
 
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 4
-    return _sew_resnet('resnext50_32x4d', Bottleneck, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet('resnext50_32x4d', Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
 
-def sew_resnext50_32x8d(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+def sew_resnext50_32x8d(pretrained=False, progress=True, **kwargs):
 
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 8
-    return _sew_resnet(None, Bottleneck, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet(None, Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
-def sew_resnext50_32x16d(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+
+def sew_resnext50_32x16d(pretrained=False, progress=True, **kwargs):
 
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 16
-    return _sew_resnet(None, Bottleneck, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet(None, Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
-def sew_resnext50_32x32d(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+
+def sew_resnext50_32x32d(pretrained=False, progress=True, **kwargs):
 
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 32
-    return _sew_resnet(None, Bottleneck, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet(None, Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
 
 
-def sew_resnext101_32x8d(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+def sew_resnext101_32x8d(pretrained=False, progress=True, **kwargs):
 
     kwargs['groups'] = 32
     kwargs['width_per_group'] = 8
-    return _sew_resnet('resnext101_32x8d', Bottleneck, [3, 4, 23, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet('resnext101_32x8d', Bottleneck, [3, 4, 23, 3], pretrained, progress, **kwargs)
 
 
-def sew_wide_resnet50_2(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
-
-    kwargs['width_per_group'] = 64 * 2
-    return _sew_resnet('wide_resnet50_2', Bottleneck, [3, 4, 6, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
-
-def sew_wide_resnet101_2(pretrained=False, progress=True, cnf: str = None, spiking_neuron: callable=None, **kwargs):
+def sew_wide_resnet50_2(pretrained=False, progress=True, **kwargs):
 
     kwargs['width_per_group'] = 64 * 2
-    return _sew_resnet('wide_resnet101_2', Bottleneck, [3, 4, 23, 3], pretrained, progress, cnf, spiking_neuron, **kwargs)
+    return _sew_resnet('wide_resnet50_2', Bottleneck, [3, 4, 6, 3], pretrained, progress, **kwargs)
+
+
+def sew_wide_resnet101_2(pretrained=False, progress=True, **kwargs):
+
+    kwargs['width_per_group'] = 64 * 2
+    return _sew_resnet('wide_resnet101_2', Bottleneck, [3, 4, 23, 3], pretrained, progress, **kwargs)
+

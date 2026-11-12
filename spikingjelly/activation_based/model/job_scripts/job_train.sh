@@ -17,11 +17,11 @@ TODO:
 
 set -euo pipefail
 
-root=/local/data/acxyle/Github/spikingjelly/spikingjelly/activation_based/model
+root=/home/pknac/Github/spikingjelly/spikingjelly/activation_based/model
 
 cd $root
 
-MODEL_ARCH=spikformer_b_16_plain
+MODEL_ARCH=sew_resnet18
 DATASET=C2k
 NEURON=LIF
 
@@ -45,15 +45,25 @@ bash job_scripts/job_utils/txt_box.sh -w 80 -c '#' "$head_info"
 
 echo "[INFO] Running for arch=$MODEL_ARCH, dataset=$DATASET, neuron=$NEURON"
 
+# ---
+# for core configurations like arch/dataset/neuron, variables are written in the top of this script
+# for specific variables, directly write below commands
+# be careful, all variables control the behaviors of the model
 # --- 
-python training_script.py \
-            -c spikformer_imagenet.yml \
+torchrun --standalone --nnodes=1 --nproc-per-node=gpu \
+         training_script.py \
+            -c resnet_imagenet.yml \
             --arch $MODEL_ARCH \
             --dataset $DATASET \
             --neuron $NEURON \
             --data-fold-training True \
             --data-fold-index 0 \
-            --clip-grad-norm 1.0
+            --clip-grad-norm 1.0 \
+            --T 4 \
+            --add_info "2080_test_t4" \
+            --disable-input-decay \
+            --sync-bn \
+            # --resume latest
 
 # torchrun --standalone --nnodes=1 --nproc-per-node=gpu \
 #     training_script.py \

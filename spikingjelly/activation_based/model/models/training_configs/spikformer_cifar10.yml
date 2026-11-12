@@ -4,8 +4,8 @@
 # arch: spikformer_8_384
 dataset: cifar10 
 batch_size: 256
-lr: 5e-4
-wd: 6e-2
+lr: 0.0005
+weight_decay: 0.06
 cupy: true
 lr_warmup_epochs: 20
 val_resize_size: 32

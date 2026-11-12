@@ -1,11 +1,11 @@
 # Training config for Resnet on ImageNet
 # comment out target line here and write in terminal
 
-arch: resnet18
+# arch: resnet18
 # dataset: ImageNet1k
-batch_size: 4
+batch_size: 16
 lr: 0.1
-wd: 0.
+weight_decay: 0.
 cupy: true
 lr_warmup_epochs: 10
 val_resize_size: 232

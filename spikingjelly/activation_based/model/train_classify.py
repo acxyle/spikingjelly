@@ -32,7 +32,7 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import sys
 import argparse
-from spikingjelly.activation_based import functional
+from spikingjelly.activation_based import functional, base, layer
 
 import shutil
 import filecmp
@@ -44,6 +44,92 @@ except ImportError:
 
 import json
 from sklearn.model_selection import StratifiedKFold
+
+from torch import nn, Tensor
+
+class TemporalSyncBatchNorm2d(nn.SyncBatchNorm, base.StepModule):
+
+    def __init__(
+        self,
+        num_features,
+        eps=1e-5,
+        momentum=0.1,
+        affine=True,
+        track_running_stats=True,
+        process_group=None,
+        step_mode="s",
+    ):
+        super().__init__(
+            num_features=num_features,
+            eps=eps,
+            momentum=momentum,
+            affine=affine,
+            track_running_stats=track_running_stats,
+            process_group=process_group,
+        )
+
+        self.step_mode = step_mode
+
+    def forward(self, x: Tensor):
+
+        if self.step_mode == "s":
+            return super().forward(x)
+
+        if self.step_mode == "m":
+            if x.dim() != 5:
+                raise ValueError(
+                    f"Expected [T, N, C, H, W], but got {x.shape}"
+                )
+
+            return functional.seq_to_ann_forward(
+                x,
+                super().forward,
+            )
+
+        raise ValueError(f"Unsupported step_mode: {self.step_mode}")
+
+
+def convert_temporal_sync_batchnorm(
+    module: nn.Module,
+    process_group=None,
+    ):
+
+    for name, child in list(module.named_children()):
+
+        if isinstance(child, layer.BatchNorm2d):
+
+            new_bn = TemporalSyncBatchNorm2d(
+                num_features=child.num_features,
+                eps=child.eps,
+                momentum=child.momentum,
+                affine=child.affine,
+                track_running_stats=child.track_running_stats,
+                process_group=process_group,
+                step_mode=child.step_mode,
+            )
+
+            # 保留原始参数
+            if child.affine:
+                new_bn.weight = child.weight
+                new_bn.bias = child.bias
+
+            # 保留 running statistics
+            if child.track_running_stats:
+                new_bn.running_mean = child.running_mean
+                new_bn.running_var = child.running_var
+                new_bn.num_batches_tracked = child.num_batches_tracked
+
+            new_bn.training = child.training
+
+            setattr(module, name, new_bn)
+
+        else:
+            convert_temporal_sync_batchnorm(
+                child,
+                process_group=process_group,
+            )
+
+    return module
 
 
 def set_deterministic(_seed_: int = 2020, disable_uda=False):
@@ -74,10 +160,10 @@ class Trainer:
         
         parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
 
-        parser.add_argument("--datadir", default='/local/data/acxyle/Datasets', type=str)
-        parser.add_argument("--dataset", default='C2k', type=str)
+        parser.add_argument("--datadir", default='/home/pknac/Datasets', type=str)
+        parser.add_argument("--dataset", default='C50', type=str)
 
-        parser.add_argument("--arch", default="sew_resnet18", type=str, help="model name")
+        parser.add_argument("--arch", default="spikformer_b_16", type=str, help="model name")
         parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
         parser.add_argument("-b", "--batch-size", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size")
         parser.add_argument("--epochs", default=300, type=int, metavar="N", help="number of total epochs to run")
@@ -704,11 +790,13 @@ class Trainer:
 
         print("Creating model")
         model = self.load_model(args, num_classes)
-        model.to(device)
-        print(model)
-
+        
         if args.distributed and args.sync_bn:
-            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+            # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+            model = convert_temporal_sync_batchnorm(model)
+
+        _ = model.to(device)
+        print(model)
 
         criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
@@ -731,7 +819,11 @@ class Trainer:
 
         model_without_ddp = model
         if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, 
+                device_ids=[args.gpu],
+                static_graph=True
+                )
             model_without_ddp = model.module
 
         model_ema = None
@@ -811,7 +903,7 @@ class Trainer:
             
             # print(f"{datetime.datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')}", args)
             if 'spikformer' in args.arch.lower():
-                for idx, _ in enumerate(model.encoder.layers):
+                for idx, _ in enumerate(model_without_ddp.encoder.layers):
                     print(f'Block {idx} | scale: {_.attn.qk_scale.data.detach().cpu().numpy():.5f}| scale_raw: {_.attn.qk_scale_raw.data.detach().cpu().numpy():.5f}')
             
             start_time = time.time()

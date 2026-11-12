@@ -9,7 +9,7 @@ Created on Wed Aug 27 12:55:31 2025
     refer to: https://github.com/ZK-Zhou/spikformer/tree/main
     
     This code adopted spikingjelly ver > 0.12
-    This code merged standard and lite spikformer
+    This code merged standard (224*224) and lite (32*32) spikformer
 
     ---
 
@@ -127,6 +127,7 @@ class SSA(nn.Module):
         proj_drop:float, 
         # sr_ratio:int=1,     # TODO: consider to recorver sr
         attn_mode:str="qk_v",
+        enable_qk_scale:bool=True,
         spiking_neuron:callable=None, 
         **kwargs):
         super().__init__()
@@ -137,11 +138,11 @@ class SSA(nn.Module):
         self.num_heads = num_heads
 
         # --- init
-        base_scale = qk_scale or (self.dim//self.num_heads)**-0.5
-        # qk_scale: raw -> softplus(raw) >= 0
-        raw_init = _softplus_inv(float(base_scale))
-        self.qk_scale_raw = nn.Parameter(torch.tensor(raw_init, dtype=torch.float32))
-        # self.qk_scale = qk_scale or (self.dim//self.num_heads)**-0.5
+        if enable_qk_scale:
+            base_scale = qk_scale or (self.dim//self.num_heads)**-0.5     # qk_scale: raw -> softplus(raw) >= 0
+            raw_init = _softplus_inv(float(base_scale))
+            self.qk_scale_raw = nn.Parameter(torch.tensor(raw_init, dtype=torch.float32))
+        self.enable_qk_scale = enable_qk_scale
 
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -170,14 +171,19 @@ class SSA(nn.Module):
         return F.softplus(self.qk_scale_raw)
 
     def _attn_qk_v(self, q, k, v, x):
-        attn = (q @ k.transpose(-1, -2)) * self.qk_scale
-        attn = self.attn_drop(attn)                            
+        attn = (q @ k.transpose(-1, -2))
+        if self.enable_qk_scale:
+            attn = attn * self.qk_scale
+        attn = self.attn_drop(attn)
         x = attn @ v                                          
         return x, attn
 
     def _attn_q_kv(self, q, k, v, x):
-        kv = k.transpose(-1, -2) @ v                          
-        x = (q @ kv) * self.qk_scale                              
+        kv = k.transpose(-1, -2) @ v
+        # kv = self.attn_drop(kv)     # who is attention? kv? v?
+        x = q @ kv
+        if self.enable_qk_scale:
+            x = x * self.qk_scale                              
         return x, kv
 
     def forward(self, x, res_attn):
@@ -428,6 +434,7 @@ class Spikformer(nn.Module):
         # norm_layer:callable,
         # sr_ratios:int,
         spiking_neuron:callable=None, 
+        enable_qk_scale:bool=True,
         emable_conv_stem:bool=True,
         enable_pos_embed:bool=False,
         enable_class_token:bool=False,
@@ -473,6 +480,7 @@ class Spikformer(nn.Module):
                             attn_drop_rate=attn_drop_rate, 
                             drop_path_rate=drop_path_rate, 
                             spiking_neuron=spiking_neuron, 
+                            enable_qk_scale=enable_qk_scale,
                             enable_pos_embed=enable_pos_embed,
                             **kwargs
                             )
@@ -509,7 +517,8 @@ class Spikformer(nn.Module):
         if self.enable_class_token:
             batch_class_token = self.class_token.expand(T, B, -1, -1)
             x = torch.cat([batch_class_token, x], dim=-2)
-            x = self.encoder(x)
+            
+        x = self.encoder(x)
 
         x = x.mean(2)
         x = self.head(x)
@@ -562,6 +571,7 @@ def spikformer_8_512_plain(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        enable_qk_scale=True,
         emable_conv_stem=False,
         enable_pos_embed=True,
         enable_class_token=True,
@@ -612,6 +622,7 @@ def spikformer_b_16_plain(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        enable_qk_scale=True,
         emable_conv_stem=False,
         enable_pos_embed=True,
         enable_class_token=True,
@@ -661,6 +672,7 @@ def spikformer_b_32_plain(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        enable_qk_scale=True,
         emable_conv_stem=False,
         enable_pos_embed=True,
         enable_class_token=True,
@@ -710,6 +722,7 @@ def spikformer_l_16_plain(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        enable_qk_scale=True,
         emable_conv_stem=False,
         enable_pos_embed=True,
         enable_class_token=True,
@@ -759,6 +772,7 @@ def spikformer_l_32_plain(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        enable_qk_scale=True,
         emable_conv_stem=False,
         enable_pos_embed=True,
         enable_class_token=True,
@@ -808,6 +822,7 @@ def spikformer_h_14_plain(pretrained=False, **kwargs):
         drop_path_rate=0.,
         # norm_layer=partial(nn.LayerNorm, eps=1e-6), 
         # sr_ratios=1,
+        enable_qk_scale=True,
         emable_conv_stem=False,
         enable_pos_embed=True,
         enable_class_token=True,
@@ -914,6 +929,7 @@ class Spikformer_lite(nn.Module):
         # norm_layer:callable,
         # sr_ratios:int,
         spiking_neuron:callable=None, 
+        enable_qk_scale:bool=True,
         emable_conv_stem:bool=True,
         enable_pos_embed:bool=False,
         enable_class_token:bool=False,
@@ -958,6 +974,7 @@ class Spikformer_lite(nn.Module):
                             attn_drop_rate=attn_drop_rate, 
                             drop_path_rate=drop_path_rate, 
                             spiking_neuron=spiking_neuron, 
+                            enable_qk_scale=enable_qk_scale,
                             enable_pos_embed=enable_pos_embed,
                             **kwargs
                             )
@@ -994,7 +1011,6 @@ class Spikformer_lite(nn.Module):
         if self.enable_class_token:
             batch_class_token = self.class_token.expand(T, B, -1, -1)
             x = torch.cat([batch_class_token, x], dim=-2)
-            x = self.encoder(x)
 
         x = self.encoder(x)
 
@@ -1111,9 +1127,11 @@ def spikformer_8_384_plain(pretrained=False, **kwargs):
     return model
 
 
+# --- debug use for capturing model shape
 def hook_fn(module, inputs, outputs) -> None:
     
     feature_single_layer.append(torch.mean(outputs.detach().cpu(), dim=0)) 
+
 
 if __name__ == "__main__":
     
